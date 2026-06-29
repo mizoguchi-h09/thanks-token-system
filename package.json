@@ -23,6 +23,7 @@
   "dependencies": {
     "discord.js": "^14.26.4",
     "dotenv": "^17.4.2",
-    "pocketbase": "^0.27.0"
+    "pocketbase": "^0.27.0",
+    "symbol-sdk": "^3.3.2"
   }
 }
