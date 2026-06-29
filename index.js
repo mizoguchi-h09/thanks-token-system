@@ -3,7 +3,7 @@ require("dotenv").config();
 const { Client, GatewayIntentBits, Partials } = require("discord.js");
 
 const PocketBase = require("pocketbase").default;
-const pb = new PocketBase("http://127.0.0.1:8091");
+const pb = new PocketBase("http://127.0.0.1:8090");
 
 const client = new Client({
   intents: [
