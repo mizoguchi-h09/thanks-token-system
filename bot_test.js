@@ -20,7 +20,7 @@ const signerKeyPair = new SymbolFacade.KeyPair(new PrivateKey(privateKeyHex));
 const facade = new SymbolFacade('testnet');
 const MONITOR_ADDRESS = facade.network.publicKeyToAddress(signerKeyPair.publicKey).toString();
 
-// コインリアクション（カスタム絵文字名）-> 送金量（XYM）の対応表
+// リアクション-> 送金量（XYM）の対応表
 const COIN_REACTIONS = {
   token_1: 1,
   token_5: 5,
@@ -30,10 +30,6 @@ const COIN_REACTIONS = {
 };
 
 // ---- テスト用設定 ----
-// 本来はリアクションされたメッセージの投稿者のアドレスへ送金しますが、
-// テスト中はこの固定アドレス宛に送金します。
-// 本番運用に切り替える際は TEST_MODE を false にしてください
-// （addresses.json による投稿者アドレス解決に戻ります）。
 const TEST_MODE = true;
 const TEST_RECIPIENT_ADDRESS = '';//送金先アドレス
 
@@ -54,7 +50,7 @@ function loadAddressMap() {
 const processedReactions = new Set();
 
 /**
- * Symbolでの送金処理（元の自動送金スクリプトをベースに、関数化・エラーを呼び出し元に伝播）
+ * Symbolでの送金処理
  * @param {string} recipientAddress 送金先アドレス
  * @param {number} amountXym 送金額（XYM単位）
  */
@@ -155,10 +151,10 @@ client.once('clientReady', async () => {
     );
 
     if (channel) {
-      await channel.send('こんにちは！Botが起動しました');
+      await channel.send('Botが起動しました');
       console.log(`「${channel.name}」チャンネルにメッセージを送信しました。`);
     } else {
-      console.log('「一般」という名前のチャンネルが見つかりませんでした。');
+      console.log('「一般」チャンネルが見つかりませんでした。');
     }
   } catch (error) {
     console.error('メッセージの送信中にエラーが発生しました:', error.message);
@@ -189,7 +185,7 @@ client.on('messageReactionAdd', async (reaction, user) => {
   const emojiName = reaction.emoji.name;
   const amount = COIN_REACTIONS[emojiName];
 
-  // まずは検知した内容を必ずログ出力する（対象/対象外を問わず）
+  // 検知したリアクションのログ出力
   console.log(`[リアクション検知] ${user.username} が「${emojiName}」をつけました`);
 
   if (!amount) {
@@ -201,8 +197,7 @@ client.on('messageReactionAdd', async (reaction, user) => {
 
   const messageAuthor = reaction.message.author;
 
-  // 通常運用時は投稿者が取得できない場合やBotの投稿は無視するが、
-  // テストモード中は固定アドレス宛に送金するのでこのチェックをスキップする
+  // 通常運用時は投稿者が取得できない場合やBotの投稿は無視するが、テストモードではスキップ
   if (!TEST_MODE) {
     if (!messageAuthor || messageAuthor.bot) {
       console.log('[送金スキップ] メッセージ投稿者が取得できないか、Botの投稿です。');
