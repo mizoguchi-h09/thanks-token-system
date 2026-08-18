@@ -1,4 +1,4 @@
-// MOSAIC_ID_GIVE（配布用）を全額回収するファイル
+// MOSAIC_ID_GIVE（配布用）を全ユーザから一括で全額回収するファイル
 
 import 'dotenv/config';
 import PocketBase from 'pocketbase';
