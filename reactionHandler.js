@@ -1,4 +1,4 @@
-//リアクションを検知用ファイル
+//リアクションを検知するファイル
 
 import PocketBase from 'pocketbase';
 import { processTokenTransaction } from './transactions.js';
