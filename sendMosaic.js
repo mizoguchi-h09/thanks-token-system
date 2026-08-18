@@ -1,4 +1,4 @@
-//組織からユーザに一括配布用ファイル
+//組織からユーザにモザイクを一括配布するファイル
 
 import 'dotenv/config';
 import PocketBase from 'pocketbase';
