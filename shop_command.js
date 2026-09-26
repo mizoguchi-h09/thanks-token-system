@@ -1,4 +1,4 @@
-import { 
+import {
   SlashCommandBuilder,
   EmbedBuilder,
   ButtonBuilder,
