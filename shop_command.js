@@ -6,24 +6,9 @@ import {
   ActionRowBuilder,
   MessageFlags
 } from 'discord.js';
-import * as symbolSdkAll from 'symbol-sdk';
-import * as dbModule from './db.js';
+import { executePointRevocation } from './shop_transaction.js';
 
-const symbol = (() => {
-  if (symbolSdkAll?.symbol?.NetworkType) return symbolSdkAll.symbol;
-  if (symbolSdkAll?.default?.symbol?.NetworkType) return symbolSdkAll.default.symbol;
-  if (symbolSdkAll?.default?.NetworkType) return symbolSdkAll.default;
-  if (symbolSdkAll?.NetworkType) return symbolSdkAll;
-  return symbolSdkAll.symbol || symbolSdkAll.default || symbolSdkAll;
-})();
-
-const getUserAddress = dbModule.getUserAddress || dbModule.default?.getUserAddress;
-
-const MOSAIC_ID = process.env.MOSAIC_ID || '0000000000000000';
-const NETWORK_TYPE = symbol.NetworkType ? symbol.NetworkType.TESTNET : 152;
-const EPOCH_ADJUSTMENT = 1637256000;
-const GENERATION_HASH = '7F741E31A9233E01428D3F8462FC4A08E61966C636758D736F224937748648A1';
-
+// 商品リスト定義
 const ITEMS = [
   {
     id: 'item_wallpaper_01',
@@ -54,6 +39,7 @@ const ITEMS = [
   }
 ];
 
+// カタログ UI のレンダリング関数
 function renderItemCard(index) {
   const item = ITEMS[index];
   const total = ITEMS.length;
@@ -97,11 +83,10 @@ export default {
     await interaction.reply({ ...card, flags: MessageFlags.Ephemeral });
   },
 
-  async handleSelect(interaction) {},
-
   async handleButton(interaction) {
     const customId = interaction.customId;
 
+    // 1. ページ切り替え（前へ / 次へ）
     if (customId.startsWith('shop_page_')) {
       const targetIndex = parseInt(customId.replace('shop_page_', ''), 10);
       if (isNaN(targetIndex) || targetIndex < 0 || targetIndex >= ITEMS.length) return;
@@ -110,13 +95,14 @@ export default {
       return await interaction.update(card);
     }
 
+    // 2. 購入確認画面への推移
     if (customId.startsWith('shop_prompt_')) {
       const index = parseInt(customId.replace('shop_prompt_', ''), 10);
       const item = ITEMS[index];
 
       const confirmEmbed = new EmbedBuilder()
         .setTitle('購入内容の確認')
-        .setDescription(`以下の商品を交換しますか？\n\n商品名: ${item.name}\n必要ポイント: ${item.price} pt`)
+        .setDescription(`以下の商品を交換しますか？\n\n商品名: **${item.name}**\n必要ポイント: **${item.price} pt**`)
         .setImage(item.image)
         .setColor(0xFFCC00);
 
@@ -134,61 +120,37 @@ export default {
       return await interaction.update({ embeds: [confirmEmbed], components: [row] });
     }
 
+    // 3. トランザクション実行・交換処理（モジュール呼出）
     if (customId.startsWith('shop_exec_')) {
       const index = parseInt(customId.replace('shop_exec_', ''), 10);
       const item = ITEMS[index];
 
       await interaction.update({ content: '決済処理を行っています...', embeds: [], components: [] });
 
-      try {
-        let userAddressRaw = null;
+      // shop_transaction.js から Point 回収ロジックを実行
+      const result = await executePointRevocation(interaction.user.id, item.price);
 
-        if (getUserAddress) {
-          userAddressRaw = await getUserAddress(interaction.user.id);
-        }
-
-        if (!userAddressRaw) {
-          return await interaction.editReply({
-            content: 'データが見つかりませんでした。'
-          });
-        }
-
-        const companyAccount = symbol.Account.createFromPrivateKey(
-          process.env.COMPANY_PRIVATE_KEY,
-          NETWORK_TYPE
-        );
-        const userAddress = symbol.Address.createFromRawAddress(userAddressRaw);
-
-        const revokeTx = symbol.MosaicSupplyRevocationTransaction.create(
-          symbol.Deadline.create(EPOCH_ADJUSTMENT),
-          userAddress,
-          new symbol.Mosaic(
-            new symbol.MosaicId(MOSAIC_ID),
-            symbol.UInt64.fromUint(item.price)
-          ),
-          NETWORK_TYPE
-        ).setMaxFee(100);
-
-        companyAccount.sign(revokeTx, GENERATION_HASH);
-
-        const fieldName = item.type === 'url' ? '受取リンク' : '引き渡しコード';
-        const fieldValue = item.type === 'url' ? `[ここをクリックして受け取る](${item.code})` : `\`${item.code}\``;
-
-        const successEmbed = new EmbedBuilder()
-          .setTitle('交換が完了しました')
-          .setDescription(`${item.name} の受け取りが完了しました。`)
-          .setImage(item.image)
-          .addFields({ name: fieldName, value: fieldValue })
-          .setColor(0x00FF00);
-
-        await interaction.editReply({ content: null, embeds: [successEmbed], components: [] });
-
-      } catch (error) {
-        console.error('購入処理エラー:', error);
-        await interaction.editReply({
-          content: 'データの処理中にエラーが発生しました。時間をおいて再度お試しください。'
+      if (!result.success) {
+        return await interaction.editReply({
+          content: result.error
         });
       }
+
+      // 成功通知 Embed の返答
+      const fieldName = item.type === 'url' ? '受取リンク' : '引き渡しコード';
+      const fieldValue = item.type === 'url' ? `[ここをクリックして受け取る](${item.code})` : `\`${item.code}\``;
+
+      const successEmbed = new EmbedBuilder()
+        .setTitle('🎉 交換が完了しました')
+        .setDescription(`**${item.name}** の受け取りが完了しました。`)
+        .setImage(item.image)
+        .addFields(
+          { name: fieldName, value: fieldValue },
+          { name: '残高', value: `${result.newBalance} pt` }
+        )
+        .setColor(0x00FF00);
+
+      await interaction.editReply({ content: null, embeds: [successEmbed], components: [] });
     }
   }
 };
