@@ -1,4 +1,4 @@
-//リアクションによる取引を行うファイル.
+//リアクションによる取引処理を行うファイル.
 
 import 'dotenv/config';
 import PocketBase from 'pocketbase';

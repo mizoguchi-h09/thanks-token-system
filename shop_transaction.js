@@ -1,3 +1,5 @@
+//ECサイトで交換する際の取引処理を行う
+
 import 'dotenv/config';
 import PocketBase from 'pocketbase';
 import { PrivateKey } from 'symbol-sdk';
@@ -15,6 +17,22 @@ const mosaicIdHex = (process.env.MOSAIC_ID_POINT || '0000000000000000')
 const mosaicId = BigInt(`0x${mosaicIdHex}`);
 
 const pb = new PocketBase(POCKETBASE_URL);
+
+/**
+ * PocketBase の管理者ログイン（設定されている場合）
+ */
+async function ensureAdminAuth() {
+  if (process.env.PB_ADMIN_EMAIL && process.env.PB_ADMIN_PASSWORD) {
+    try {
+      await pb.admins.authWithPassword(
+        process.env.PB_ADMIN_EMAIL,
+        process.env.PB_ADMIN_PASSWORD
+      );
+    } catch (err) {
+      console.warn('[PB Debug] Admin ログインスキップまたは失敗:', err.message);
+    }
+  }
+}
 
 /**
  * ノードから指定アドレスの Point 最新保有量を取得する関数
@@ -36,14 +54,22 @@ export async function getMosaicBalance(addressStr) {
 }
 
 /**
- * 組織（Bot）権限によりユーザーのアカウントから Point を回収し、PocketBase の残高を更新する処理
+ * 組織（Bot）権限によりユーザーのアカウントから Point を回収し、PocketBase の残高更新およびチケット作成を行う処理
  * @param {string} discordId - 購入を行ったユーザーの Discord ID
- * @param {number} itemPrice - 商品の必要ポイント数
- * @returns {Promise<{success: boolean, newBalance?: number, error?: string}>}
+ * @param {object|number} itemInput - 商品オブジェクト または 価格(数値)
+ * @param {string} [userName] - Discord のユーザー名 (追加)
+ * @returns {Promise<{success: boolean, newBalance?: number, ticketId?: string, error?: string}>}
  */
-export async function executePointRevocation(discordId, itemPrice) {
+export async function executePointRevocation(discordId, itemInput, userName = '') {
   try {
-    console.log(`[PB Debug] 検索対象 Discord ID: "${discordId}" (型: ${typeof discordId})`);
+    // 0. 管理者権限での PocketBase 接続準備
+    await ensureAdminAuth();
+
+    // 引数がオブジェクト(item)か数値(price)かを自動判別
+    const itemPrice = typeof itemInput === 'object' ? itemInput.price : itemInput;
+    const itemObj = typeof itemInput === 'object' ? itemInput : null;
+
+    console.log(`[PB Debug] 検索対象 Discord ID: "${discordId}" (ユーザー名: ${userName})`);
 
     // 1. PocketBase から該当ユーザー情報を取得
     let userRecord = null;
@@ -51,15 +77,16 @@ export async function executePointRevocation(discordId, itemPrice) {
       userRecord = await pb.collection('discord_users').getFirstListItem(
         `discordId="${String(discordId)}"`
       );
-      console.log('[PB Debug] レコード取得成功:', userRecord);
+      console.log('[PB Debug] レコード取得成功:', userRecord.id);
     } catch (pbErr) {
-      console.error('[PB Debug] 取得失敗 (ステータス/詳細):', pbErr.status, pbErr.message);
+      console.error('[PB Debug] ユーザー取得失敗:', pbErr.status, pbErr.message);
+      if (pbErr.data) console.error('[PB Debug] 詳細:', JSON.stringify(pbErr.data));
     }
 
     if (!userRecord || !userRecord.symbolAddress) {
       return { 
         success: false, 
-        error: `❌ アカウント情報が見つかりません (ID: ${discordId})。\n/register で再登録するか、PocketBase の API Rules / フィールド名 (symbolAddress) を確認してください。` 
+        error: `❌ アカウント情報が見つかりません (ID: ${discordId})。\n/register で再登録するか確認してください。` 
       };
     }
 
@@ -67,7 +94,7 @@ export async function executePointRevocation(discordId, itemPrice) {
 
     // 2. オンチェーン上の Point 最新残高を確認
     const currentBalance = await getMosaicBalance(userAddressStr);
-    const requiredAmount = BigInt(itemPrice);
+    const requiredAmount = BigInt(itemPrice); // 数値(itemPrice)から安全に BigInt 化
 
     if (currentBalance < requiredAmount) {
       return { 
@@ -131,16 +158,37 @@ export async function executePointRevocation(discordId, itemPrice) {
       point_balance: newBalance
     });
 
+    // 6. チケットレコードの新規発行 (itemObj が存在する場合)
+    let ticketId = null;
+    if (itemObj) {
+      const ticketData = {
+        discordId: String(discordId),
+        userName: userName,
+        itemId: itemObj.id,
+        itemName: itemObj.name,
+        status: 'unused'
+      };
+
+      console.log('[PB Debug] チケット作成試行データ:', ticketData);
+      const ticketRecord = await pb.collection('tickets').create(ticketData);
+      ticketId = ticketRecord.id;
+      console.log(`[PB Debug] チケット発行成功 (ID: ${ticketId})`);
+    }
+
     return {
       success: true,
-      newBalance: newBalance
+      newBalance: newBalance,
+      ticketId: ticketId
     };
 
   } catch (error) {
     console.error('Point 回収処理エラー (shop_transaction.js):', error);
+    if (error.data) {
+      console.error('[PB Error Data]:', JSON.stringify(error.data, null, 2));
+    }
     return { 
       success: false, 
-      error: '❌ 決済トランザクションの処理中にエラーが発生しました。' 
+      error: `❌ 決済トランザクションの処理中にエラーが発生しました。（${error.message || '詳細不明'}）` 
     };
   }
 }
