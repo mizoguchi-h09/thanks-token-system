@@ -1,5 +1,3 @@
-//ユーザのアカウントを削除する。現状削除した場合は、復元不可
-
 import { 
   EmbedBuilder, 
   ActionRowBuilder, 

@@ -1,5 +1,3 @@
-//ECサイトを開くコマンド
-
 import {
   SlashCommandBuilder,
   EmbedBuilder,
@@ -127,7 +125,7 @@ export default {
 
     // 3. ポイント引き落とし・チケット発行処理
     if (customId.startsWith('shop_exec_')) {
-      // ★【重要】重いブロックチェーン処理を行う前に、即座に画面を「処理中」にして3秒タイムアウトを防ぐ
+      // 即座に画面を「処理中」にして3秒タイムアウトを防ぐ
       await interaction.update({ 
         content: '⏳ 決済およびブロックチェーン処理を行っています...しばらくお待ちください。', 
         embeds: [], 
@@ -195,17 +193,17 @@ export default {
 
     // 4. 【消し込み処理】「タップして使用」ボタン押下時
     if (customId.startsWith('shop_useticket_')) {
-      // ★【重要】PocketBase 通信前に即座に思考中状態（deferUpdate）にする
       await interaction.deferUpdate();
 
-      const ticketId = customId.replace('shop_useticket_', '');
+      const customTicketId = customId.replace('shop_useticket_', '');
 
       try {
         if (process.env.PB_ADMIN_EMAIL && process.env.PB_ADMIN_PASSWORD) {
           await pb.admins.authWithPassword(process.env.PB_ADMIN_EMAIL, process.env.PB_ADMIN_PASSWORD);
         }
 
-        const ticket = await pb.collection('tickets').getOne(ticketId);
+        // 1. customTicketId（TKT-...）フィールドで検索し、レコードを取得
+        const ticket = await pb.collection('tickets').getFirstListItem(`ticketId="${customTicketId}"`);
 
         if (ticket.status === 'used') {
           return await interaction.followUp({
@@ -214,7 +212,8 @@ export default {
           });
         }
 
-        await pb.collection('tickets').update(ticketId, {
+        // 2. 検索で取得した PocketBase 内部の主キー (ticket.id) を使って更新
+        await pb.collection('tickets').update(ticket.id, {
           status: 'used',
           usedAt: new Date().toISOString()
         });
@@ -225,13 +224,13 @@ export default {
           .addFields(
             { name: '所有者', value: `\`${ticket.userName || '不明'}\``, inline: true },
             { name: 'ステータス', value: '🔴 **利用済み (無効)**', inline: true },
-            { name: 'チケットID', value: `\`${ticket.id}\``, inline: true }
+            { name: 'チケットID', value: `\`${ticket.ticketId || ticket.id}\``, inline: true }
           )
           .setColor(0xEF4444)
           .setFooter({ text: `使用日時: ${new Date().toLocaleString('ja-JP')}` });
 
         const disabledBtn = new ButtonBuilder()
-          .setCustomId(`disabled_${ticketId}`)
+          .setCustomId(`disabled_${customTicketId}`)
           .setLabel('済（使用完了）')
           .setStyle(ButtonStyle.Secondary)
           .setDisabled(true);

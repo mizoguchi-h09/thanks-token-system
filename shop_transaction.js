@@ -1,11 +1,11 @@
-//ECサイトで交換する際の取引処理を行う
-
 import 'dotenv/config';
 import PocketBase from 'pocketbase';
 import { PrivateKey } from 'symbol-sdk';
 import { SymbolFacade, KeyPair, Address } from 'symbol-sdk/symbol';
 
-// 1. 各種環境変数の読み込み
+// ==========================================
+// 1. 各種環境変数の読み込み & 初期設定
+// ==========================================
 const PRIVATE_KEY = process.env.SYMBOL_PRIVATE_KEY;
 const POCKETBASE_URL = process.env.POCKETBASE_URL;
 const NODE_URL = process.env.SYMBOL_NODE;
@@ -36,7 +36,8 @@ async function ensureAdminAuth() {
 
 /**
  * ノードから指定アドレスの Point 最新保有量を取得する関数
- * @param {string} addressStr - Symbol アドレス文字列
+ * 
+ * @param {string} addressStr アドレス文字列
  * @returns {Promise<bigint>} 保有している Point 量
  */
 export async function getMosaicBalance(addressStr) {
@@ -55,9 +56,10 @@ export async function getMosaicBalance(addressStr) {
 
 /**
  * 組織（Bot）権限によりユーザーのアカウントから Point を回収し、PocketBase の残高更新およびチケット作成を行う処理
- * @param {string} discordId - 購入を行ったユーザーの Discord ID
- * @param {object|number} itemInput - 商品オブジェクト または 価格(数値)
- * @param {string} [userName] - Discord のユーザー名 (追加)
+ * 
+ * @param {string} discordId 購入を行ったユーザーの Discord ID
+ * @param {object|number} itemInput 商品オブジェクト または 価格(数値)
+ * @param {string} [userName] Discord のユーザー名
  * @returns {Promise<{success: boolean, newBalance?: number, ticketId?: string, error?: string}>}
  */
 export async function executePointRevocation(discordId, itemInput, userName = '') {
@@ -161,7 +163,11 @@ export async function executePointRevocation(discordId, itemInput, userName = ''
     // 6. チケットレコードの新規発行 (itemObj が存在する場合)
     let ticketId = null;
     if (itemObj) {
+      // 一意なカスタムチケットID (例: TKT-M8X9A2-K3F8) を生成
+      const generatedTicketId = `TKT-${Date.now().toString(36)}-${Math.random().toString(36).substring(2, 7)}`.toUpperCase();
+
       const ticketData = {
+        ticketId: generatedTicketId, // テキスト型として指定
         discordId: String(discordId),
         userName: userName,
         itemId: itemObj.id,
@@ -170,9 +176,11 @@ export async function executePointRevocation(discordId, itemInput, userName = ''
       };
 
       console.log('[PB Debug] チケット作成試行データ:', ticketData);
+
+      // 'tickets' コレクションに作成
       const ticketRecord = await pb.collection('tickets').create(ticketData);
-      ticketId = ticketRecord.id;
-      console.log(`[PB Debug] チケット発行成功 (ID: ${ticketId})`);
+      ticketId = ticketRecord.ticketId;
+      console.log(`[PB Debug] チケット発行成功 (ticketId: ${ticketId})`);
     }
 
     return {
@@ -189,6 +197,56 @@ export async function executePointRevocation(discordId, itemInput, userName = ''
     return { 
       success: false, 
       error: `❌ 決済トランザクションの処理中にエラーが発生しました。（${error.message || '詳細不明'}）` 
+    };
+  }
+}
+
+/**
+ * ユーザーがチケットを使用（タップ消し込み）した際のステータス更新処理
+ * 
+ * @param {string} inputTicketId 消し込み対象の ticketId（例: "TKT-XXXXX"）
+ * @returns {Promise<{success: boolean, itemName?: string, error?: string}>}
+ */
+export async function useTicket(inputTicketId) {
+  try {
+    await ensureAdminAuth();
+
+    // 1. 'tickets' コレクションから ticketId フィールドで該当レコードを検索
+    const record = await pb.collection('tickets').getFirstListItem(
+      `ticketId="${inputTicketId}"`
+    );
+
+    if (!record) {
+      return { 
+        success: false, 
+        error: `❌ チケット (ID: ${inputTicketId}) が見つかりませんでした。` 
+      };
+    }
+
+    if (record.status === 'used') {
+      return { 
+        success: false, 
+        error: '⚠️ このチケットは既に使用済みです。' 
+      };
+    }
+
+    // 2. 検索で得られた PocketBase の固有 ID (record.id) を指定して status を 'used' に更新
+    await pb.collection('tickets').update(record.id, {
+      status: 'used'
+    });
+
+    console.log(`[PB Debug] チケット使用完了 (ticketId: ${inputTicketId}, record.id: ${record.id})`);
+
+    return { 
+      success: true, 
+      itemName: record.itemName 
+    };
+
+  } catch (err) {
+    console.error('[PB Error] チケット使用処理エラー:', err);
+    return { 
+      success: false, 
+      error: `❌ 消し込み処理に失敗しました。（${err.message || '詳細不明'}）` 
     };
   }
 }

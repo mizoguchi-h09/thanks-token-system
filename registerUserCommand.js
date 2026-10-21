@@ -1,5 +1,3 @@
-//ユーザを新規登録するコマンド
-
 import { EmbedBuilder } from 'discord.js';
 import PocketBase from 'pocketbase';
 // ★ Symbol 固有の機能をサブモジュールからインポート

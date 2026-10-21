@@ -1,6 +1,4 @@
-// 組織の秘密鍵のみで各ユーザーの MOSAIC_ID_POINTを全額回収し、PocketBase の残高を 0 に更新する
-//これはテスト時のみ使用
-
+// 組織の秘密鍵のみで各ユーザーの MOSAIC_ID_POINTを全額回収し、PocketBase の残高を 0 に更新するスクリプト
 import 'dotenv/config';
 import PocketBase from 'pocketbase';
 import { PrivateKey } from 'symbol-sdk';

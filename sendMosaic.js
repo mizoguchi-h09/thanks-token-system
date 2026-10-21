@@ -1,5 +1,4 @@
-//組織からユーザにモザイクを一括配布するファイル
-
+//組織からユーザに一括配布用
 import 'dotenv/config';
 import PocketBase from 'pocketbase';
 import { PrivateKey } from 'symbol-sdk';
@@ -11,6 +10,9 @@ import { SymbolFacade, KeyPair, Address } from 'symbol-sdk/symbol';
 const PRIVATE_KEY = process.env.SYMBOL_PRIVATE_KEY;
 const POCKETBASE_URL = process.env.POCKETBASE_URL;
 const NODE_URL = process.env.SYMBOL_NODE;
+
+// 配布量（数値）
+const DISTRIBUTE_AMOUNT = 300;
 
 // .env からモザイクID（文字列）を取得し、16進数 BigInt に変換
 const mosaicIdHex = process.env.MOSAIC_ID_GIVE;
@@ -39,7 +41,7 @@ async function main() {
 
   console.log(`データ総数: ${records.length}件`);
 
-  // JS側で有効なアドレスを持つレコードのみを抽出（フィールド名表記揺れにも対応）
+  // JS側で有効なアドレスを持つレコードのみを抽出
   const validRecords = records.filter((record) => {
     const addr = record.symbolAddress;
     return addr && typeof addr === 'string' && addr.trim() !== '';
@@ -60,7 +62,6 @@ async function main() {
   console.log(`\n✅ 送信対象者: 計 ${validRecords.length} 名`);
   console.log('--------------------------------------------------');
   validRecords.forEach((record, index) => {
-    // フィールド名に合わせたアドレスとユーザー名の取得
     const address = (record.symbolAddress).trim();
     const username = record.username;
     
@@ -84,7 +85,7 @@ async function main() {
       mosaics: [
         {
           mosaicId: mosaicId,
-          amount: 10n // 各ユーザーに 10 トークン配布
+          amount: BigInt(DISTRIBUTE_AMOUNT) // 配布量を指定
         }
       ]
     });
@@ -127,6 +128,34 @@ async function main() {
 
   const result = await response.json();
   console.log('Announce Result:', result);
+
+  // --------------------------------------------------
+  // 6. PocketBase の残高データ更新
+  // --------------------------------------------------
+  if (response.ok || result.message === 'packet 9-accepted') {
+    console.log('\n🔄 PocketBase の残高データを更新中...');
+
+    for (const record of validRecords) {
+      try {
+        // 現在の残高に加算したい場合 (give_balance が空の場合は 0 とみなす)
+        const currentBalance = record.give_balance || 0;
+        const newBalance = currentBalance + DISTRIBUTE_AMOUNT;
+
+        // もし「加算」ではなく「配布された数値（50）に上書き」したい場合は、
+        // 単に give_balance: DISTRIBUTE_AMOUNT に変更してください。
+        await pb.collection('discord_users').update(record.id, {
+          give_balance: newBalance
+        });
+
+        console.log(`  └ 📝 更新完了: ${record.username || record.id} (新残高: ${newBalance})`);
+      } catch (dbErr) {
+        console.error(`  └ ⚠️ PB更新失敗 (${record.id}):`, dbErr.message);
+      }
+    }
+    console.log('\n✨ 全ての処理が完了しました！');
+  } else {
+    console.error('\n❌ ノードへの送信に失敗したため、PocketBase の残高更新をスキップしました。');
+  }
 }
 
 main().catch((err) => {

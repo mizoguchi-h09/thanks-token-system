@@ -1,5 +1,4 @@
-//回収可能モザイクを作成するファイル
-
+//回収可能モザイク作成用
 import 'dotenv/config';
 import { PrivateKey } from 'symbol-sdk';
 import { SymbolFacade, KeyPair, generateMosaicId } from 'symbol-sdk/symbol';

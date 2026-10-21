@@ -1,5 +1,3 @@
-//リアクションによる取引処理を行うファイル.
-
 import 'dotenv/config';
 import PocketBase from 'pocketbase';
 import { PrivateKey } from 'symbol-sdk';
@@ -51,32 +49,43 @@ export async function processTokenTransaction({ senderUser, receiverUser, amount
   const mosaicGive = BigInt(`0x${MOSAIC_ID_GIVE.replace(/^0x/i, '')}`);
   const mosaicPoint = BigInt(`0x${MOSAIC_ID_POINT.replace(/^0x/i, '')}`);
 
+// --------------------------------------------------
+  // 1. ブロックチェーンに書き込むメッセージを作成
   // --------------------------------------------------
-  // インナートランザクションの構築
+  // 例: "From: hitomi02411 To: mizo0268 (token_5)"
+  const noteText = `From: ${senderUser.username} To: ${receiverUser.username} (${emoji})`;
+  
+  // 文字列を Uint8Array に変換し、先頭に 0x00 (PlainText 識別子) を付与
+  const textBytes = new TextEncoder().encode(noteText);
+  const messageBytes = new Uint8Array([0x00, ...textBytes]);
+
+  // --------------------------------------------------
+  // 2. インナートランザクションの構築
   // --------------------------------------------------
 
   // ① ユーザーAから GIVE モザイクを回収 (Revocate)
   const innerCollectTx = facade.transactionFactory.createEmbedded({
     type: 'mosaic_supply_revocation_transaction_v1',
-    signerPublicKey: adminKeyPair.publicKey, // 発行者（管理者）の署名権限
-    sourceAddress: senderAddress,             // ユーザーAのアドレスから回収
+    signerPublicKey: adminKeyPair.publicKey,
+    sourceAddress: senderAddress,
     mosaic: {
       mosaicId: mosaicGive,
       amount: tokenAmount
     }
   });
 
-  // ② ユーザーBへ POINT モザイクを付与 (Transfer)
+  // ② ユーザーBへ POINT モザイクを付与 & メッセージ記録 (Transfer)
   const innerGrantTx = facade.transactionFactory.createEmbedded({
     type: 'transfer_transaction_v1',
-    signerPublicKey: adminKeyPair.publicKey, // 発行者（管理者）から送信
-    recipientAddress: receiverAddress,         // ユーザーBのアドレスへ送信
+    signerPublicKey: adminKeyPair.publicKey,
+    recipientAddress: receiverAddress,
     mosaics: [
       {
         mosaicId: mosaicPoint,
         amount: tokenAmount
       }
-    ]
+    ],
+    message: messageBytes // ★ ここに「誰が誰に送ったか」のメッセージを追加
   });
 
   const innerTransactions = [innerCollectTx, innerGrantTx];

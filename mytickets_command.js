@@ -1,5 +1,3 @@
-//所持中の未使用チケットを一覧表示するコマンド
-
 import {
   SlashCommandBuilder,
   EmbedBuilder,
@@ -62,9 +60,10 @@ export default {
         .setColor(0x5865F2);
 
       tickets.forEach((ticket, index) => {
+        const displayTicketId = ticket.ticketId || ticket.id;
         listEmbed.addFields({
           name: `${index + 1}.${ticket.itemName}`,
-          value: `ID: \`${ticket.id}\``,
+          value: `ID: \`${displayTicketId}\``,
           inline: false
         });
       });
@@ -74,12 +73,13 @@ export default {
         .setCustomId('myticket_select')
         .setPlaceholder('🎟️ 表示するチケットを選択してください...')
         .addOptions(
-          tickets.slice(0, 25).map((ticket, index) =>
-            new StringSelectMenuOptionBuilder()
+          tickets.slice(0, 25).map((ticket, index) => {
+            const displayTicketId = ticket.ticketId || ticket.id;
+            return new StringSelectMenuOptionBuilder()
               .setLabel(`${index + 1}.${ticket.itemName}`)
-              .setDescription(`ID: ${ticket.id}`)
-              .setValue(ticket.id)
-          )
+              .setDescription(`ID: ${displayTicketId}`)
+              .setValue(ticket.id); // 主キーで即時取得するため value は ticket.id
+          })
         );
 
       const row = new ActionRowBuilder().addComponents(selectMenu);
@@ -110,7 +110,7 @@ export default {
 
       const selectedTicketId = interaction.values[0];
 
-      // 選択されたチケットの情報を取得
+      // 選択されたチケットの情報を主キーで取得
       const ticket = await pb.collection('tickets').getOne(selectedTicketId);
 
       if (ticket.status === 'used') {
@@ -120,6 +120,8 @@ export default {
         });
       }
 
+      const displayTicketId = ticket.ticketId || ticket.id;
+
       // 単体チケット表示 Embed
       const ticketEmbed = new EmbedBuilder()
         .setTitle('🎫 デジタル引換チケット')
@@ -127,14 +129,14 @@ export default {
         .addFields(
           { name: '所有者', value: `\`${ticket.userName || interaction.user.displayName}\``, inline: true },
           { name: 'ステータス', value: '🟢 **未使用 (有効)**', inline: true },
-          { name: 'チケットID', value: `\`${ticket.id}\``, inline: true }
+          { name: 'チケットID', value: `\`${displayTicketId}\``, inline: true }
         )
         .setColor(0x22C55E)
         .setFooter({ text: '※スタッフの目の前でボタンを押してください' });
 
-      // 使用する（消し込み）ボタン
+      // 使用する（消し込み）ボタン：shop_command.js 側のハンドラ用にカスタムID (TKT-...) をセット
       const useBtn = new ButtonBuilder()
-        .setCustomId(`shop_useticket_${ticket.id}`)
+        .setCustomId(`shop_useticket_${displayTicketId}`)
         .setLabel('タップして使用')
         .setStyle(ButtonStyle.Danger);
 

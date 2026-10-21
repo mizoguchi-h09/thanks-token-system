@@ -1,5 +1,3 @@
-//リアクションを検知するファイル
-
 import PocketBase from 'pocketbase';
 import { processTokenTransaction } from './transactions.js';
 
@@ -44,7 +42,7 @@ async function syncUserBalances(discordId) {
       point_balance: pointBalance,
     });
 
-    console.log(`🔄 残高同期完了 [${record.discord_id}]: GIVE=${giveBalance}, POINT=${pointBalance}`);
+    console.log(`🔄 残高同期完了 [${record.discordId}]: GIVE=${giveBalance}, POINT=${pointBalance}`);
   } catch (err) {
     console.error(`⚠️ 残高同期エラー (discord_id: ${discordId}):`, err.message);
   }

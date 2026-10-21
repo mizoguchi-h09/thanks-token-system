@@ -1,5 +1,4 @@
 //残高確認用コマンド
-
 import { EmbedBuilder } from 'discord.js';
 import PocketBase from 'pocketbase';
 

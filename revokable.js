@@ -1,5 +1,4 @@
-// MOSAIC_ID_GIVE（配布用）を全ユーザから一括で全額回収する
-
+// 組織の秘密鍵のみで各ユーザーの MOSAIC_ID_GIVE を全額回収し、PocketBase の残高を 0 に更新するスクリプト
 import 'dotenv/config';
 import PocketBase from 'pocketbase';
 import { PrivateKey } from 'symbol-sdk';
