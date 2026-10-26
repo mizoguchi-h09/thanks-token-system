@@ -30,7 +30,7 @@ const ITEMS = [
     code: 'TICKET_DRINK_REAL',
     image: 'https://images.unsplash.com/photo-1622483767028-3f66f32aef97?w=600&auto=format&fit=crop',
     description: 'ドリンク1本と引き換えできる対面用デジタルチケットです。',
-    type: 'ticket' // ★ Discord内消し込み対象
+    type: 'ticket' // Discord内消し込み対象
   },
   {
     id: 'item_coupon_500',
@@ -43,16 +43,39 @@ const ITEMS = [
   }
 ];
 
-// カタログ UI レンダリング関数
-function renderItemCard(index) {
+/**
+ * PocketBase からユーザーの最新残高を取得する関数
+ */
+async function getUserPointBalance(discordId) {
+  try {
+    if (process.env.PB_ADMIN_EMAIL && process.env.PB_ADMIN_PASSWORD) {
+      await pb.admins.authWithPassword(process.env.PB_ADMIN_EMAIL, process.env.PB_ADMIN_PASSWORD);
+    }
+    const user = await pb.collection('discord_users').getFirstListItem(`discordId="${discordId}"`);
+    return user ? (user.point_balance || 0) : 0;
+  } catch (err) {
+    console.warn(`⚠️ 残高取得失敗 (DiscordId: ${discordId}):`, err.message);
+    return 0;
+  }
+}
+
+/**
+ * カタログ UI レンダリング関数 (残高 pointBalance を引数に追加)
+ */
+function renderItemCard(index, pointBalance = 0) {
   const item = ITEMS[index];
   const total = ITEMS.length;
 
   const embed = new EmbedBuilder()
     .setTitle(`ポイントショップ (${index + 1}/${total})`)
-    .setDescription(`### ${item.name}\n必要ポイント: \`${item.price} pt\`\n\n${item.description}`)
+    .setDescription(
+      `💰 **現在の保有ポイント**: \`${pointBalance} pt\`\n\n` +
+      `### ${item.name}\n` +
+      `必要ポイント: \`${item.price} pt\`\n\n` +
+      `${item.description}`
+    )
     .setImage(item.image)
-    .setColor(0x5865F2)
+    .setColor(pointBalance >= item.price ? 0x5865F2 : 0x94A3B8)
     .setFooter({ text: '前へ / 次へ ボタンで商品を移動できます' });
 
   const prevBtn = new ButtonBuilder()
@@ -61,10 +84,12 @@ function renderItemCard(index) {
     .setStyle(ButtonStyle.Secondary)
     .setDisabled(index === 0);
 
+  // ポイント不足の場合はボタンを無効化（誤操作防止）
   const buyBtn = new ButtonBuilder()
     .setCustomId(`shop_prompt_${index}`)
-    .setLabel('この商品を交換する')
-    .setStyle(ButtonStyle.Primary);
+    .setLabel(pointBalance >= item.price ? 'この商品を交換する' : 'ポイント不足')
+    .setStyle(pointBalance >= item.price ? ButtonStyle.Primary : ButtonStyle.Secondary)
+    .setDisabled(pointBalance < item.price);
 
   const nextBtn = new ButtonBuilder()
     .setCustomId(`shop_page_${index + 1}`)
@@ -83,7 +108,9 @@ export default {
     .setDescription('ポイントショップを開きます'),
 
   async execute(interaction) {
-    const card = renderItemCard(0);
+    // 1. 最新の point_balance を取得
+    const balance = await getUserPointBalance(interaction.user.id);
+    const card = renderItemCard(0, balance);
     await interaction.reply({ ...card, flags: MessageFlags.Ephemeral });
   },
 
@@ -94,7 +121,10 @@ export default {
     if (customId.startsWith('shop_page_')) {
       const targetIndex = parseInt(customId.replace('shop_page_', ''), 10);
       if (isNaN(targetIndex) || targetIndex < 0 || targetIndex >= ITEMS.length) return;
-      const card = renderItemCard(targetIndex);
+
+      // 最新の残高を取得して再描画
+      const balance = await getUserPointBalance(interaction.user.id);
+      const card = renderItemCard(targetIndex, balance);
       return await interaction.update(card);
     }
 
@@ -102,10 +132,16 @@ export default {
     if (customId.startsWith('shop_prompt_')) {
       const index = parseInt(customId.replace('shop_prompt_', ''), 10);
       const item = ITEMS[index];
+      const balance = await getUserPointBalance(interaction.user.id);
 
       const confirmEmbed = new EmbedBuilder()
         .setTitle('購入内容の確認')
-        .setDescription(`以下の商品を交換しますか？\n\n商品名: **${item.name}**\n必要ポイント: **${item.price} pt**`)
+        .setDescription(
+          `以下の商品を交換しますか？\n\n` +
+          `商品名: **${item.name}**\n` +
+          `必要ポイント: **${item.price} pt**\n` +
+          `現在の所持ポイント: **${balance} pt** ➔ 交換後: **${balance - item.price} pt**`
+        )
         .setImage(item.image)
         .setColor(0xFFCC00);
 
@@ -125,7 +161,6 @@ export default {
 
     // 3. ポイント引き落とし・チケット発行処理
     if (customId.startsWith('shop_exec_')) {
-      // 即座に画面を「処理中」にして3秒タイムアウトを防ぐ
       await interaction.update({ 
         content: '⏳ 決済およびブロックチェーン処理を行っています...しばらくお待ちください。', 
         embeds: [], 
@@ -136,7 +171,6 @@ export default {
       const item = ITEMS[index];
       const userName = interaction.user.displayName || interaction.user.username;
 
-      // 重い処理（Symbolノード通信 + PocketBase更新）を実行
       const result = await executePointRevocation(interaction.user.id, item, userName);
 
       if (!result.success) {
@@ -202,7 +236,6 @@ export default {
           await pb.admins.authWithPassword(process.env.PB_ADMIN_EMAIL, process.env.PB_ADMIN_PASSWORD);
         }
 
-        // 1. customTicketId（TKT-...）フィールドで検索し、レコードを取得
         const ticket = await pb.collection('tickets').getFirstListItem(`ticketId="${customTicketId}"`);
 
         if (ticket.status === 'used') {
@@ -212,7 +245,6 @@ export default {
           });
         }
 
-        // 2. 検索で取得した PocketBase 内部の主キー (ticket.id) を使って更新
         await pb.collection('tickets').update(ticket.id, {
           status: 'used',
           usedAt: new Date().toISOString()
@@ -237,7 +269,6 @@ export default {
 
         const row = new ActionRowBuilder().addComponents(disabledBtn);
 
-        // editReply でメッセージを更新
         await interaction.editReply({
           content: '✅ **引き換えが完了しました！**',
           embeds: [usedEmbed],
