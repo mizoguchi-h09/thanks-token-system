@@ -7,12 +7,31 @@ import {
   MessageFlags
 } from 'discord.js';
 import PocketBase from 'pocketbase';
+import { PrivateKey } from 'symbol-sdk';
+import { SymbolFacade, KeyPair, Address } from 'symbol-sdk/symbol';
 import { executePointRevocation } from './shop_transaction.js';
 
 const POCKETBASE_URL = process.env.POCKETBASE_URL;
+const SYMBOL_NODE = process.env.SYMBOL_NODE;
+const SYMBOL_PRIVATE_KEY = process.env.SYMBOL_PRIVATE_KEY;
+const MOSAIC_ID_TICKET_DRINK = process.env.MOSAIC_ID_TICKET_DRINK;
+
 const pb = new PocketBase(POCKETBASE_URL);
 
-// 商品リスト定義
+async function ensureAdminAuth() {
+  if (process.env.PB_ADMIN_EMAIL && process.env.PB_ADMIN_PASSWORD) {
+    try {
+      if (pb.admins) {
+        await pb.admins.authWithPassword(process.env.PB_ADMIN_EMAIL, process.env.PB_ADMIN_PASSWORD);
+      } else {
+        await pb.collection('_superusers').authWithPassword(process.env.PB_ADMIN_EMAIL, process.env.PB_ADMIN_PASSWORD);
+      }
+    } catch (err) {
+      console.warn('⚠️ PB 管理者認証スキップ:', err.message);
+    }
+  }
+}
+
 const ITEMS = [
   {
     id: 'item_wallpaper_01',
@@ -30,7 +49,7 @@ const ITEMS = [
     code: 'TICKET_DRINK_REAL',
     image: 'https://images.unsplash.com/photo-1622483767028-3f66f32aef97?w=600&auto=format&fit=crop',
     description: 'ドリンク1本と引き換えできる対面用デジタルチケットです。',
-    type: 'ticket' // Discord内消し込み対象
+    type: 'ticket'
   },
   {
     id: 'item_coupon_500',
@@ -43,25 +62,19 @@ const ITEMS = [
   }
 ];
 
-/**
- * PocketBase からユーザーの最新残高を取得する関数
- */
 async function getUserPointBalance(discordId) {
   try {
-    if (process.env.PB_ADMIN_EMAIL && process.env.PB_ADMIN_PASSWORD) {
-      await pb.admins.authWithPassword(process.env.PB_ADMIN_EMAIL, process.env.PB_ADMIN_PASSWORD);
-    }
-    const user = await pb.collection('discord_users').getFirstListItem(`discordId="${discordId}"`);
-    return user ? (user.point_balance || 0) : 0;
+    await ensureAdminAuth();
+    const userList = await pb.collection('discord_users').getList(1, 1, {
+      filter: `discordId="${discordId}"`
+    });
+    return userList.items.length > 0 ? (userList.items[0].point_balance || 0) : 0;
   } catch (err) {
     console.warn(`⚠️ 残高取得失敗 (DiscordId: ${discordId}):`, err.message);
     return 0;
   }
 }
 
-/**
- * カタログ UI レンダリング関数 (残高 pointBalance を引数に追加)
- */
 function renderItemCard(index, pointBalance = 0) {
   const item = ITEMS[index];
   const total = ITEMS.length;
@@ -84,7 +97,6 @@ function renderItemCard(index, pointBalance = 0) {
     .setStyle(ButtonStyle.Secondary)
     .setDisabled(index === 0);
 
-  // ポイント不足の場合はボタンを無効化（誤操作防止）
   const buyBtn = new ButtonBuilder()
     .setCustomId(`shop_prompt_${index}`)
     .setLabel(pointBalance >= item.price ? 'この商品を交換する' : 'ポイント不足')
@@ -108,7 +120,6 @@ export default {
     .setDescription('ポイントショップを開きます'),
 
   async execute(interaction) {
-    // 1. 最新の point_balance を取得
     const balance = await getUserPointBalance(interaction.user.id);
     const card = renderItemCard(0, balance);
     await interaction.reply({ ...card, flags: MessageFlags.Ephemeral });
@@ -117,18 +128,15 @@ export default {
   async handleButton(interaction) {
     const customId = interaction.customId;
 
-    // 1. カタログのページ移動（前へ / 次へ）
     if (customId.startsWith('shop_page_')) {
       const targetIndex = parseInt(customId.replace('shop_page_', ''), 10);
       if (isNaN(targetIndex) || targetIndex < 0 || targetIndex >= ITEMS.length) return;
 
-      // 最新の残高を取得して再描画
       const balance = await getUserPointBalance(interaction.user.id);
       const card = renderItemCard(targetIndex, balance);
       return await interaction.update(card);
     }
 
-    // 2. 購入確認画面
     if (customId.startsWith('shop_prompt_')) {
       const index = parseInt(customId.replace('shop_prompt_', ''), 10);
       const item = ITEMS[index];
@@ -159,7 +167,6 @@ export default {
       return await interaction.update({ embeds: [confirmEmbed], components: [row] });
     }
 
-    // 3. ポイント引き落とし・チケット発行処理
     if (customId.startsWith('shop_exec_')) {
       await interaction.update({ 
         content: '⏳ 決済およびブロックチェーン処理を行っています...しばらくお待ちください。', 
@@ -177,7 +184,6 @@ export default {
         return await interaction.editReply({ content: result.error });
       }
 
-      // 【対面用チケット（type: 'ticket'）の場合】
       if (item.type === 'ticket' && result.ticketId) {
         const ticketEmbed = new EmbedBuilder()
           .setTitle('🎫 デジタル引換チケット')
@@ -190,7 +196,7 @@ export default {
             { name: '現在のポイント残高', value: `${result.newBalance} pt`, inline: false }
           )
           .setColor(0x22C55E)
-          .setFooter({ text: '※スタッフの目の前でボタンを押してください' })
+          .setFooter({ text: '※スタッフの目の前でボタンを押してください（Symbolモザイクが回収されます）' })
           .setTimestamp();
 
         const useBtn = new ButtonBuilder()
@@ -207,7 +213,6 @@ export default {
         });
       }
 
-      // 【通常デジタルコード/URL商品の場合】
       const fieldName = item.type === 'url' ? '受取リンク' : '引き渡しコード';
       const fieldValue = item.type === 'url' ? `[ここをクリックして受け取る](${item.code})` : `\`${item.code}\``;
 
@@ -232,11 +237,29 @@ export default {
       const customTicketId = customId.replace('shop_useticket_', '');
 
       try {
-        if (process.env.PB_ADMIN_EMAIL && process.env.PB_ADMIN_PASSWORD) {
-          await pb.admins.authWithPassword(process.env.PB_ADMIN_EMAIL, process.env.PB_ADMIN_PASSWORD);
+        await ensureAdminAuth();
+
+        // 1. チケット情報の取得 (filter クエリを使わず全取得して JS 側で判定)
+        const allTickets = await pb.collection('tickets').getFullList();
+
+        if (allTickets.length > 0) {
+          console.log('🔍 PB tickets レコードの実際のフィールド名一覧:', Object.keys(allTickets[0]));
         }
 
-        const ticket = await pb.collection('tickets').getFirstListItem(`ticketId="${customTicketId}"`);
+        // ticketId, ticketld, id のいずれかに一致するレコードを検索
+        const ticket = allTickets.find(t => 
+          t.ticketId === customTicketId || 
+          t.ticketld === customTicketId || 
+          t.id === customTicketId
+        );
+
+        if (!ticket) {
+          console.error(`⚠️ チケットが見つかりません: customTicketId="${customTicketId}"`);
+          return await interaction.followUp({
+            content: `❌ チケット情報（ID: ${customTicketId}）が DB に存在しません。`,
+            flags: MessageFlags.Ephemeral
+          });
+        }
 
         if (ticket.status === 'used') {
           return await interaction.followUp({
@@ -245,6 +268,84 @@ export default {
           });
         }
 
+        // 所有者の Discord ID を特定
+        const targetDiscordId = ticket.discordId || ticket.discordld || ticket.userId || interaction.user.id;
+
+        // 2. ユーザー情報の取得 (全取得して JS 側で判定)
+        const allUsers = await pb.collection('discord_users').getFullList();
+        const userRecord = allUsers.find(u => u.discordId === targetDiscordId || u.discordld === targetDiscordId);
+
+        if (!userRecord) {
+          return await interaction.followUp({
+            content: `❌ ユーザー情報（Discord ID: ${targetDiscordId}）が DB に存在しません。`,
+            flags: MessageFlags.Ephemeral
+          });
+        }
+
+        if (!userRecord.symbolAddress) {
+          return await interaction.followUp({
+            content: '❌ ユーザーの Symbol アドレスが登録されていません。',
+            flags: MessageFlags.Ephemeral
+          });
+        }
+
+        const cleanAddrStr = userRecord.symbolAddress.replace(/-/g, '').trim().toUpperCase();
+
+        // 3. Symbol ブロックチェーン上でのチケット回収 ＆ オンチェーンログ刻印 (Aggregate Tx)
+        const facade = new SymbolFacade('testnet');
+        const adminKeyPair = new KeyPair(new PrivateKey(SYMBOL_PRIVATE_KEY.trim()));
+        const targetAddress = new Address(cleanAddrStr);
+
+        const mosaicIdHex = (MOSAIC_ID_TICKET_DRINK || '').replace(/^0x/i, '').padStart(16, '0').toLowerCase();
+        const ticketMosaicId = BigInt(`0x${mosaicIdHex}`);
+
+        // 内部Tx1: モザイク回収
+        const innerRevokeTx = facade.transactionFactory.createEmbedded({
+          type: 'mosaic_supply_revocation_transaction_v1',
+          signerPublicKey: adminKeyPair.publicKey,
+          sourceAddress: targetAddress,
+          mosaic: {
+            mosaicId: ticketMosaicId,
+            amount: 1n
+          }
+        });
+
+        // 内部Tx2: 使用ログのメッセージ送信 (TICKET_USE:TKT-xxx)
+        const innerMessageTx = facade.transactionFactory.createEmbedded({
+          type: 'transfer_transaction_v1',
+          signerPublicKey: adminKeyPair.publicKey,
+          recipientAddress: targetAddress,
+          mosaics: [],
+          message: new Uint8Array([0x00, ...Buffer.from(`TICKET_USE:${customTicketId}`)])
+        });
+
+        const innerTransactions = [innerRevokeTx, innerMessageTx];
+        const merkleHash = facade.static.hashEmbeddedTransactions(innerTransactions);
+
+        const aggregateTx = facade.transactionFactory.create({
+          type: 'aggregate_complete_transaction_v3',
+          signerPublicKey: adminKeyPair.publicKey,
+          fee: 0n,
+          deadline: facade.now().addSeconds(7200).timestamp,
+          transactionsHash: merkleHash,
+          transactions: innerTransactions
+        });
+
+        aggregateTx.fee.value = BigInt(aggregateTx.size * 200);
+
+        const signature = facade.signTransaction(adminKeyPair, aggregateTx);
+        const payloadJson = facade.transactionFactory.constructor.attachSignature(aggregateTx, signature);
+
+        const announceRes = await fetch(`${SYMBOL_NODE}/transactions`, {
+          method: 'PUT',
+          headers: { 'Content-Type': 'application/json' },
+          body: payloadJson
+        });
+
+        const announceResult = await announceRes.json();
+        console.log('🎫 チケットモザイク回収 Aggregate Tx 結果:', announceResult);
+
+        // 4. PocketBase のステータス更新
         await pb.collection('tickets').update(ticket.id, {
           status: 'used',
           usedAt: new Date().toISOString()
@@ -252,11 +353,11 @@ export default {
 
         const usedEmbed = new EmbedBuilder()
           .setTitle('🔴 デジタル引換チケット (使用済み)')
-          .setDescription(`**【 ${ticket.itemName} 】**\n\nこのチケットは使用が完了しました。`)
+          .setDescription(`**【 ${ticket.itemName} 】**\n\nこのチケットは使用が完了しました（Symbolモザイク回収完了）。`)
           .addFields(
-            { name: '所有者', value: `\`${ticket.userName || '不明'}\``, inline: true },
+            { name: '所有者', value: `\`${ticket.userName || interaction.user.username}\``, inline: true },
             { name: 'ステータス', value: '🔴 **利用済み (無効)**', inline: true },
-            { name: 'チケットID', value: `\`${ticket.ticketId || ticket.id}\``, inline: true }
+            { name: 'チケットID', value: `\`${ticket.ticketId || ticket.ticketld || ticket.id}\``, inline: true }
           )
           .setColor(0xEF4444)
           .setFooter({ text: `使用日時: ${new Date().toLocaleString('ja-JP')}` });
@@ -270,15 +371,18 @@ export default {
         const row = new ActionRowBuilder().addComponents(disabledBtn);
 
         await interaction.editReply({
-          content: '✅ **引き換えが完了しました！**',
+          content: '✅ **引き換えが完了しました！（オンチェーン回収完了）**',
           embeds: [usedEmbed],
           components: [row]
         });
 
       } catch (error) {
         console.error('チケット消し込みエラー:', error);
+        if (error.data) {
+          console.error('🔍 PB エラー詳細:', JSON.stringify(error.data, null, 2));
+        }
         await interaction.followUp({
-          content: '❌ チケットの処理中にエラーが発生しました。',
+          content: `❌ 処理中にエラーが発生しました: ${error.message}`,
           flags: MessageFlags.Ephemeral
         });
       }

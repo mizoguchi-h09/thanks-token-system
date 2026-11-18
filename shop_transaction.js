@@ -3,250 +3,171 @@ import PocketBase from 'pocketbase';
 import { PrivateKey } from 'symbol-sdk';
 import { SymbolFacade, KeyPair, Address } from 'symbol-sdk/symbol';
 
-// ==========================================
-// 1. 各種環境変数の読み込み & 初期設定
-// ==========================================
-const PRIVATE_KEY = process.env.SYMBOL_PRIVATE_KEY;
 const POCKETBASE_URL = process.env.POCKETBASE_URL;
-const NODE_URL = process.env.SYMBOL_NODE;
-
-// Point モザイク ID の整形 (0xプレフィックスの除去)
-const mosaicIdHex = (process.env.MOSAIC_ID_POINT || '0000000000000000')
-  .replace(/^0x/i, '')
-  .toLowerCase();
-const mosaicId = BigInt(`0x${mosaicIdHex}`);
+const SYMBOL_NODE = process.env.SYMBOL_NODE;
+const SYMBOL_PRIVATE_KEY = process.env.SYMBOL_PRIVATE_KEY;
+const MOSAIC_ID_POINT = process.env.MOSAIC_ID_POINT;
+const MOSAIC_ID_TICKET_DRINK = process.env.MOSAIC_ID_TICKET_DRINK;
 
 const pb = new PocketBase(POCKETBASE_URL);
 
 /**
- * PocketBase の管理者ログイン（設定されている場合）
+ * PocketBase 管理者認証ヘルパー
  */
 async function ensureAdminAuth() {
   if (process.env.PB_ADMIN_EMAIL && process.env.PB_ADMIN_PASSWORD) {
     try {
-      await pb.admins.authWithPassword(
-        process.env.PB_ADMIN_EMAIL,
-        process.env.PB_ADMIN_PASSWORD
-      );
+      if (pb.admins) {
+        await pb.admins.authWithPassword(process.env.PB_ADMIN_EMAIL, process.env.PB_ADMIN_PASSWORD);
+      } else {
+        await pb.collection('_superusers').authWithPassword(process.env.PB_ADMIN_EMAIL, process.env.PB_ADMIN_PASSWORD);
+      }
     } catch (err) {
-      console.warn('[PB Debug] Admin ログインスキップまたは失敗:', err.message);
+      console.warn('⚠️ PB 管理者認証スキップ:', err.message);
     }
   }
 }
 
 /**
- * ノードから指定アドレスの Point 最新保有量を取得する関数
- * 
- * @param {string} addressStr アドレス文字列
- * @returns {Promise<bigint>} 保有している Point 量
+ * ポイント回収および商品・チケット引き渡しトランザクションの実行
+ * @param {string} discordId ユーザーの Discord ID
+ * @param {Object} item 購入対象の商品オブジェクト
+ * @param {string} userName ユーザーの表示名
  */
-export async function getMosaicBalance(addressStr) {
+export async function executePointRevocation(discordId, item, userName) {
   try {
-    const res = await fetch(`${NODE_URL}/accounts/${addressStr}`);
-    if (!res.ok) return 0n;
-    const data = await res.json();
-    const mosaics = data.account?.mosaics || [];
-    const match = mosaics.find(m => m.id.toLowerCase() === mosaicIdHex);
-    return match ? BigInt(match.amount) : 0n;
-  } catch (err) {
-    console.error('[PB/Node Debug] モザイク残高取得エラー:', err);
-    return 0n;
-  }
-}
-
-/**
- * 組織（Bot）権限によりユーザーのアカウントから Point を回収し、PocketBase の残高更新およびチケット作成を行う処理
- * 
- * @param {string} discordId 購入を行ったユーザーの Discord ID
- * @param {object|number} itemInput 商品オブジェクト または 価格(数値)
- * @param {string} [userName] Discord のユーザー名
- * @returns {Promise<{success: boolean, newBalance?: number, ticketId?: string, error?: string}>}
- */
-export async function executePointRevocation(discordId, itemInput, userName = '') {
-  try {
-    // 0. 管理者権限での PocketBase 接続準備
     await ensureAdminAuth();
 
-    // 引数がオブジェクト(item)か数値(price)かを自動判別
-    const itemPrice = typeof itemInput === 'object' ? itemInput.price : itemInput;
-    const itemObj = typeof itemInput === 'object' ? itemInput : null;
-
-    console.log(`[PB Debug] 検索対象 Discord ID: "${discordId}" (ユーザー名: ${userName})`);
-
-    // 1. PocketBase から該当ユーザー情報を取得
-    let userRecord = null;
-    try {
-      userRecord = await pb.collection('discord_users').getFirstListItem(
-        `discordId="${String(discordId)}"`
-      );
-      console.log('[PB Debug] レコード取得成功:', userRecord.id);
-    } catch (pbErr) {
-      console.error('[PB Debug] ユーザー取得失敗:', pbErr.status, pbErr.message);
-      if (pbErr.data) console.error('[PB Debug] 詳細:', JSON.stringify(pbErr.data));
-    }
-
-    if (!userRecord || !userRecord.symbolAddress) {
-      return { 
-        success: false, 
-        error: `❌ アカウント情報が見つかりません (ID: ${discordId})。\n/register で再登録するか確認してください。` 
-      };
-    }
-
-    const userAddressStr = userRecord.symbolAddress.trim();
-
-    // 2. オンチェーン上の Point 最新残高を確認
-    const currentBalance = await getMosaicBalance(userAddressStr);
-    const requiredAmount = BigInt(itemPrice); // 数値(itemPrice)から安全に BigInt 化
-
-    if (currentBalance < requiredAmount) {
-      return { 
-        success: false, 
-        error: `❌ Point 残高が不足しています。（保有: ${currentBalance.toString()} pt / 必要: ${itemPrice} pt）` 
-      };
-    }
-
-    // 3. Symbol SDK v3 (SymbolFacade) を使用したトランザクション構築
-    const facade = new SymbolFacade('testnet');
-    const orgPrivateKey = new PrivateKey(PRIVATE_KEY.trim());
-    const orgKeyPair = new KeyPair(orgPrivateKey);
-    const userAddress = new Address(userAddressStr);
-
-    // モザイク回収（Revocation）インナートランザクションの生成
-    const innerTx = facade.transactionFactory.createEmbedded({
-      type: 'mosaic_supply_revocation_transaction_v1',
-      signerPublicKey: orgKeyPair.publicKey,
-      sourceAddress: userAddress,
-      mosaic: {
-        mosaicId: mosaicId,
-        amount: requiredAmount
-      }
+    // 1. ユーザーレコード取得
+    const userList = await pb.collection('discord_users').getList(1, 1, {
+      filter: `discordId="${discordId}"`
     });
 
-    // アグリゲートコンプリート Tx の構築
-    const merkleHash = facade.static.hashEmbeddedTransactions([innerTx]);
+    if (userList.items.length === 0) {
+      return { success: false, error: '❌ ユーザー情報が PocketBase に登録されていません。' };
+    }
+
+    const userRecord = userList.items[0];
+    if (!userRecord.symbolAddress) {
+      return { success: false, error: '❌ Symbol アドレスが登録されていません。' };
+    }
+
+    const currentBalance = userRecord.point_balance || 0;
+    if (currentBalance < item.price) {
+      return { success: false, error: '❌ 保有ポイントが足りません。' };
+    }
+
+    const cleanAddrStr = userRecord.symbolAddress.replace(/-/g, '').trim().toUpperCase();
+    const userAddress = new Address(cleanAddrStr);
+
+    // 2. Symbol トランザクション構築
+    const facade = new SymbolFacade('testnet');
+    const adminKeyPair = new KeyPair(new PrivateKey(SYMBOL_PRIVATE_KEY.trim()));
+
+    const pointMosaicIdHex = (MOSAIC_ID_POINT || '').replace(/^0x/i, '').padStart(16, '0').toLowerCase();
+    const pointMosaicId = BigInt(`0x${pointMosaicIdHex}`);
+
+    const innerTransactions = [];
+
+    // インナートランザクション 1: POINT モザイク回収
+    const revokePointTx = facade.transactionFactory.createEmbedded({
+      type: 'mosaic_supply_revocation_transaction_v1',
+      signerPublicKey: adminKeyPair.publicKey,
+      sourceAddress: userAddress,
+      mosaic: {
+        mosaicId: pointMosaicId,
+        amount: BigInt(item.price)
+      }
+    });
+    innerTransactions.push(revokePointTx);
+
+    let generatedTicketId = null;
+
+    // インナートランザクション 2（チケット商品の場合）:
+    // チケットモザイクの送金 ＆ オンチェーンメッセージ刻印（TICKET_ISSUE:TKT-xxx）
+    if (item.type === 'ticket') {
+      generatedTicketId = `TKT-${Date.now().toString(36).toUpperCase()}`;
+
+      const ticketMosaicIdHex = (MOSAIC_ID_TICKET_DRINK || '').replace(/^0x/i, '').padStart(16, '0').toLowerCase();
+      const ticketMosaicId = BigInt(`0x${ticketMosaicIdHex}`);
+
+      const sendTicketTx = facade.transactionFactory.createEmbedded({
+        type: 'transfer_transaction_v1',
+        signerPublicKey: adminKeyPair.publicKey,
+        recipientAddress: userAddress,
+        mosaics: [
+          {
+            mosaicId: ticketMosaicId,
+            amount: 1n
+          }
+        ],
+        message: new Uint8Array([0x00, ...Buffer.from(`TICKET_ISSUE:${generatedTicketId}`)])
+      });
+      innerTransactions.push(sendTicketTx);
+    }
+
+    // アグリゲート Complete トランザクションの組み立て
+    const merkleHash = facade.static.hashEmbeddedTransactions(innerTransactions);
     const deadline = facade.now().addSeconds(7200).timestamp;
 
     const aggregateTx = facade.transactionFactory.create({
       type: 'aggregate_complete_transaction_v3',
-      signerPublicKey: orgKeyPair.publicKey,
+      signerPublicKey: adminKeyPair.publicKey,
       fee: 0n,
       deadline: deadline,
       transactionsHash: merkleHash,
-      transactions: [innerTx]
+      transactions: innerTransactions
     });
 
-    aggregateTx.fee.value = BigInt(aggregateTx.size * 100);
+    aggregateTx.fee.value = BigInt(aggregateTx.size * 200);
 
-    // 組織の鍵で署名・ペイロード作成
-    const signature = facade.signTransaction(orgKeyPair, aggregateTx);
+    const signature = facade.signTransaction(adminKeyPair, aggregateTx);
     const payloadJson = facade.transactionFactory.constructor.attachSignature(aggregateTx, signature);
 
-    // 4. Symbol ノードへ送信 (アナウンス)
-    const response = await fetch(`${NODE_URL}/transactions`, {
+    // ノードへアナウンス
+    const response = await fetch(`${SYMBOL_NODE}/transactions`, {
       method: 'PUT',
       headers: { 'Content-Type': 'application/json' },
       body: payloadJson
     });
 
     const result = await response.json();
+    console.log('🛍️ 商品購入 Aggregate Tx 結果:', result);
 
-    if (!response.ok && result.message !== 'packet 9-accepted') {
-      throw new Error(`Node announce error: ${JSON.stringify(result)}`);
+    if (!response.ok && result.message !== 'packet 9 was pushed to the network via /transactions') {
+      return { success: false, error: '❌ ブロックチェーンへの送信に失敗しました。' };
     }
 
-    // 5. 決済成功後、PocketBase の point_balance を減算更新
-    const newBalance = Number(currentBalance - requiredAmount);
+    // 3. PocketBase 側の残高更新
+    const newBalance = currentBalance - item.price;
     await pb.collection('discord_users').update(userRecord.id, {
       point_balance: newBalance
     });
 
-    // 6. チケットレコードの新規発行 (itemObj が存在する場合)
-    let ticketId = null;
-    if (itemObj) {
-      // 一意なカスタムチケットID (例: TKT-M8X9A2-K3F8) を生成
-      const generatedTicketId = `TKT-${Date.now().toString(36)}-${Math.random().toString(36).substring(2, 7)}`.toUpperCase();
-
-      const ticketData = {
-        ticketId: generatedTicketId, // テキスト型として指定
-        discordId: String(discordId),
+    // 4. チケット商品の場合は PocketBase の tickets コレクションへ保存
+    if (item.type === 'ticket' && generatedTicketId) {
+      await pb.collection('tickets').create({
+        ticketId: generatedTicketId,
+        discordId: discordId,
         userName: userName,
-        itemId: itemObj.id,
-        itemName: itemObj.name,
-        status: 'unused'
-      };
-
-      console.log('[PB Debug] チケット作成試行データ:', ticketData);
-
-      // 'tickets' コレクションに作成
-      const ticketRecord = await pb.collection('tickets').create(ticketData);
-      ticketId = ticketRecord.ticketId;
-      console.log(`[PB Debug] チケット発行成功 (ticketId: ${ticketId})`);
+        itemName: item.name,
+        itemId: item.id,
+        status: 'unused',
+        usedAt: ''
+      });
     }
 
     return {
       success: true,
       newBalance: newBalance,
-      ticketId: ticketId
-    };
-
-  } catch (error) {
-    console.error('Point 回収処理エラー (shop_transaction.js):', error);
-    if (error.data) {
-      console.error('[PB Error Data]:', JSON.stringify(error.data, null, 2));
-    }
-    return { 
-      success: false, 
-      error: `❌ 決済トランザクションの処理中にエラーが発生しました。（${error.message || '詳細不明'}）` 
-    };
-  }
-}
-
-/**
- * ユーザーがチケットを使用（タップ消し込み）した際のステータス更新処理
- * 
- * @param {string} inputTicketId 消し込み対象の ticketId（例: "TKT-XXXXX"）
- * @returns {Promise<{success: boolean, itemName?: string, error?: string}>}
- */
-export async function useTicket(inputTicketId) {
-  try {
-    await ensureAdminAuth();
-
-    // 1. 'tickets' コレクションから ticketId フィールドで該当レコードを検索
-    const record = await pb.collection('tickets').getFirstListItem(
-      `ticketId="${inputTicketId}"`
-    );
-
-    if (!record) {
-      return { 
-        success: false, 
-        error: `❌ チケット (ID: ${inputTicketId}) が見つかりませんでした。` 
-      };
-    }
-
-    if (record.status === 'used') {
-      return { 
-        success: false, 
-        error: '⚠️ このチケットは既に使用済みです。' 
-      };
-    }
-
-    // 2. 検索で得られた PocketBase の固有 ID (record.id) を指定して status を 'used' に更新
-    await pb.collection('tickets').update(record.id, {
-      status: 'used'
-    });
-
-    console.log(`[PB Debug] チケット使用完了 (ticketId: ${inputTicketId}, record.id: ${record.id})`);
-
-    return { 
-      success: true, 
-      itemName: record.itemName 
+      ticketId: generatedTicketId
     };
 
   } catch (err) {
-    console.error('[PB Error] チケット使用処理エラー:', err);
-    return { 
-      success: false, 
-      error: `❌ 消し込み処理に失敗しました。（${err.message || '詳細不明'}）` 
-    };
+    console.error('❌ executePointRevocation エラー:', err);
+    if (err.data) {
+      console.error('🔍 PB エラー詳細:', JSON.stringify(err.data, null, 2));
+    }
+    return { success: false, error: `❌ 処理中にエラーが発生しました: ${err.message}` };
   }
 }
